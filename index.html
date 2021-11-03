@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Serial tool</title>
+<script>
+let connectedPorts = [];
+let selectedPort = null;
+
+// Formats an 8-bit integer |value| in hexadecimal with leading zeros.
+const hex8 = value => {
+  return ('00' + value.toString(16)).substr(-2).toUpperCase();
+};
+
+// Formats a 16-bit integer |value| in hexadecimal with leading zeros.
+const hex16 = value => {
+  return ('0000' + value.toString(16)).substr(-4).toUpperCase();
+};
+
+const hexview = data => {
+  let buffer = '';
+  let u8array = new Uint8Array(data.buffer);
+  for (const byteValue of u8array) {
+    if (buffer)
+      buffer += ' ';
+    buffer += hex8(byteValue);
+  }
+  return buffer;
+};
+
+const parseHexArray = text => {
+  // Remove non-hex characters.
+  text = text.replace(/[^0-9a-fA-F]/g, '');
+  if (text.length % 2)
+    return null;
+
+  // Parse each character pair as a hex byte value.
+  let u8 = new Uint8Array(text.length / 2);
+  for (let i = 0; i < text.length; i += 2)
+    u8[i / 2] = parseInt(text.substr(i, 2), 16);
+
+  return new DataView(u8.buffer);
+};
+
+// Displays the port chooser to allow the user to connect to a new port.
+// The selection is updated to the newly connected port.
+const connectPort = () => {
+  navigator.serial.requestPort().then(port => {
+    if (port === null)
+      return;
+
+    addPort(port);
+    selectPort(port);
+  });
+};
+
+// Opens the port for reading and writing.
+const openPort = () => {
+  if (selectedPort === null)
+    return;
+
+  if (selectedPort.readable !== null)
+    return;
+
+  console.log('opening port');
+  selectedPort.open({baudRate:9600}).then(() => {
+    console.log('port opened');
+    listenToPort(selectedPort);
+  	updatePortInfo();
+  });
+}
+
+// Adds |port| to |connectedPorts|. Selects the port if there was no prior
+// selection.
+const addPort = port => {
+  if (connectedPorts.includes(port)) {
+    console.log('port already in connectedPorts');
+    return;
+  }
+  connectedPorts.push(port);
+  console.log('port connected');
+  if (selectedPort === null)
+    selectPort(port);
+  updatePortMenu();
+};
+
+// Removes |port| from |connectedPorts|.
+const removePort = port => {
+  if (port === selectedPort)
+    selectedPort = null;
+  for (let i = connectedPorts.length - 1; i >= 0; --i) {
+    if (connectedPorts[i] === port) {
+      connectedPorts.splice(i, 1);
+      console.log('port disconnected');
+      updatePortMenu();
+    }
+  }
+};
+
+const onDataReceived = value => {
+  if (selectedPort === null)
+    return;
+
+  const textarea = document.getElementById('receiveBuffer');
+  textarea.value += value;
+  console.log('onDataReceived: ' + value);
+};
+
+const writeToPort = async (port, value) => {
+  if (!port || !port.writable || port.writable.locked)
+    return;
+
+	const encoder = new TextEncoder();
+  const writer = port.writable.getWriter();
+  try {
+		console.log('writing to port');
+	  await writer.write(encoder.encode(value));
+    await writer.ready;
+	  await writer.close();
+  } finally {
+  	writer.releaseLock();
+  }
+
+  console.log('write complete');
+};
+
+const listenToPort = async port => {
+  while (selectedPort && selectedPort.readable && !selectedPort.readable.locked) {
+	  const reader = selectedPort.readable.getReader();
+  	console.log('reading from port');
+    let result = null;
+    try {
+      result = await reader.read();
+    } finally {
+      reader.releaseLock();
+    }
+
+    if (result !== null) {
+      const decoder = new TextDecoder();
+      onDataReceived(decoder.decode(result.value));
+    }
+  
+    console.log('read complete');
+  
+    if (reader && !result.done)
+	    setTimeout(listenToPort);
+  }
+};
+
+// Selects |port| and updates the port info display.
+const selectPort = port => {
+  if (!port) {
+    selectedPort = null;
+  } else {
+    let select = document.getElementById('portSelect');
+    for (let i = 0; i < select.options.length; ++i) {
+      if (select.options[i].port === port) {
+        select.value = i;
+        break;
+      }
+    }
+    selectedPort = port;
+  }
+
+  updatePortInfo();
+};
+
+// Updates the port selection menu to match |connectedPorts|.
+const updatePortMenu = () => {
+  let select = document.getElementById('portSelect');
+  for (let i = select.options.length - 1; i >= 0; --i)
+    select.options[i] = null;
+
+  if (connectedPorts.length == 0) {
+    var opt = document.createElement('option');
+    opt.value = 0;
+    opt.port = null;
+    opt.innerHTML = 'No connected ports';
+    select.appendChild(opt);
+  } else {
+    let index = 0;
+    for (let port of connectedPorts) {
+      var opt = document.createElement('option');
+      opt.value = index++;
+      opt.port = port;
+      opt.innerHTML = 'port-' + opt.value;
+      select.appendChild(opt);
+    }
+  }
+  
+  updatePortInfo();
+};
+
+const refreshPorts = () => {
+  // Fetch the list of connected ports.
+  navigator.serial.getPorts().then(ports => {
+    for (let port of ports)
+      addPort(port);
+  });
+};
+
+// Called when the user changes the selected port.
+const portSelectionChanged = () => {
+  const select = document.getElementById('portSelect');
+  selectPort(select.options[select.value].port);
+};
+
+// Updates the port info display for the currently selected port.
+const updatePortInfo = () => {
+  const textarea = document.getElementById('portInfo');
+  if (selectedPort == null) {
+    textarea.value = '';
+    return;
+  }
+
+	const info = selectedPort.getInfo();
+  textarea.value = 'onconnect: ' + (selectedPort.onconnect ? 'non-null' : 'null') + '\n'
+                     + 'ondisconnect: ' + (selectedPort.ondisconnect ? 'non-null' : 'null') + '\n';
+
+	if (selectedPort.readable)
+    textarea.value += 'readable: non-null (port open)\n'
+                        + 'readable.locked: ' + (selectedPort.readable.locked ? 'true' : 'false') + '\n';
+  else
+    textarea.value += 'readable: null (port closed)\n';
+
+	if (selectedPort.writable)
+    textarea.value += 'writable: non-null (port open)\n'
+                        + 'writable.locked: ' + (selectedPort.writable.locked ? 'true' : 'false') + '\n';
+  else
+    textarea.value += 'writable: null (port closed)\n';
+
+  if (info.usbVendorId)
+    textarea.value += 'usbVendorId: 0x' + hex16(info.usbVendorId) + '\n';
+  if (info.usbProductId)
+    textarea.value += 'usbProductId: 0x' + hex16(info.usbProductId) + '\n';
+};
+
+const sendBuffer = () => {
+  const textarea = document.getElementById('sendBuffer');
+  const value = textarea.value;
+  console.log('writing <' + value + '>');
+  writeToPort(selectedPort, value);
+};
+
+const clearBuffers = () => {
+  const receiveBufferTextarea = document.getElementById('receiveBuffer');
+  receiveBufferTextarea.value = '';
+
+	const sendBufferTextarea = document.getElementById('sendBuffer');
+  sendBufferTextarea.value = '';
+};
+
+window.onload = () => {
+	refreshPorts();
+
+  // Register for connection and disconnection events.
+  navigator.serial.onconnect = e => { addPort(e.port); };
+  navigator.serial.ondisconnect = e => { removePort(e.port); };
+};
+</script>
+</head>
+<body>
+<h1>Serial tool</h1>
+<button onclick="connectPort()">Connect</button>
+<button onclick="openPort()">Open</button>
+<button onclick="clearBuffers()">Clear buffers</button>
+<select id="portSelect" oninput="portSelectionChanged()"></select>
+<br />
+Receive buffer<br />
+<textarea id="receiveBuffer" cols="100" rows="5" disabled></textarea><br />
+Send buffer <button onclick="sendBuffer()">Send</button><br />
+<textarea id="sendBuffer" cols="100" rows="5"></textarea><br />
+Port info<br />
+<textarea id="portInfo" cols="100" rows="10" disabled></textarea><br />
+</body>
+</html>
